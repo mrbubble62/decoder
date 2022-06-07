@@ -1,12 +1,12 @@
 # iBeacon
 
-|Model Id|[IBEACON](https://github.com/theengs/decoder/blob/development/src/devices/IBEACON_json.h)|
+|Model Id|[IBEACON](https://github.com/theengs/decoder/blob/development/src/devices/iBeacon_json.h)|
 |-|-|
 |Brand|Generic|
-|Model|Ibeacon|
-|Short Description|Ibeacon protocol|
+|Model|iBeacon|
+|Short Description|iBeacon protocol|
 |Communication|BLE broadcast|
 |Frequency|2.4Ghz|
 |Power source|Sensor dependent|
-|Exchanged data|mfid, uuid, minor, major, power/battery|
+|Exchanged data|mfid, uuid, minor, major, power/voltage|
 |Encrypted|No|

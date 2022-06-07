@@ -18,7 +18,7 @@ R""""(
       "tempc":{
          "condition":["servicedata", 25, "4"],
          "decoder":["value_from_hex_data", "servicedata", 30, 4, true],
-         "post_proc":['/', 10]
+         "post_proc":["/", 10]
       },
       "moi":{
          "condition":["servicedata", 25, "8"],
@@ -58,9 +58,24 @@ Examples:
 
 The third parameter (fifth if data length is specified) can be either the index value or the data value to find. If the second (fourth if data length specified) parameter is `contain`, the next parameter should be the value to look for in the data source. If the second (fourth if data length specified) parameter is `index`, the next parameter should be the location in the data source to look for the value.
 
-`condition` can have multiple conditions chanined together using '|' and '&' between them.  
-For example: `"condition":["servicedata", "index", 0, "0804", '|', "servicedata", "index", 0, "8804"]`  
+`condition` can have multiple conditions chanined together using "|" and "&" between them.  
+For example: `"condition":["servicedata", "index", 0, "0804", "|", "servicedata", "index", 0, "8804"]`  
 This will match if the service data at index 0 is "0804" `OR` "8804".
+
+`condition` can contain JSON arrays that can be processed separately. This allows for nesting of detection tests such as:  
+`"condition": [["servicedata", "index", 0, "1234", "&" "servicedata", "index", 5, "5678"], "|", "servicedata", "index", 30, "abcd"]`  
+This will result in a positive detection if the service data at index `0` == `0x1234` and the service data at index `5` == `0x5678`, otherwise, if the service data at index `30` == `0xabcd`, the result will also be positive.
+
+::: warning Note
+Nesting is discouraged from use wherever possible as the recursive nature may cause stack overflowing in some circumstances.  
+The above example could be re-written as:  
+`"condition": ["servicedata", "index", 30, "abcd", "|", "servicedata", "index", 0, "1234", "&" "servicedata", "index", 5, "5678"]`  
+Which has the same result, without nesting.
+:::
+
+`condition` NOT(!) testing; Anytime a condition test value is preceded by a "!", the inverse of the result will be used to determine the result.  
+Example: `"condition": ["servicedata", "index", 30, "!", "abcd", "&", "servicedata", "index", 0, "1234"]  
+If the value of the service data at index 30 is not 0xabcd and the data at index 0 is 0x1234, the result is a positive detection.
 
 ### Properties
 Properties is a nested JSON object containing one or more JSON objects. In the example above it looks like:
@@ -69,7 +84,7 @@ Properties is a nested JSON object containing one or more JSON objects. In the e
       "tempc":{
          "condition":["servicedata", 25, "4"],
          "decoder":["value_from_hex_data", "servicedata", 30, 4, true],
-         "post_proc":['/', 10]
+         "post_proc":["/", 10]
       },
 ```
 
@@ -80,34 +95,87 @@ Here we have a single property that defines a value that we want to decode. The 
 - "manufacturerdata"
 
 The second parameter is the index of the data source to look for the value. The third parameter is the value to test for.
+
+If a direct binary bit evaluation encoded in a hex digit is desired the third parameter is `"bit"`, the fourth parameter the bit position from 0-3 and the fifth parameter `0` or `1`.
+
+```
+ "properties":{
+      "hum":{
+         "condition":["servicedata", 10, "bit", 3, 0],
+         "decoder":["value_from_hex_data", "servicedata", 10, 2, false, false]
+      },
+```
+
 If the condition is met the data will be decoded and added to the JsonObject.
+
+`condition` can contain JSON arrays that can be processed separately. This allows for nesting of detection tests such as:  
+`"condition": [["servicedata", 25, "4", "&" "servicedata", 26, "5"], "|", "servicedata", 30, "abcd"]`  
+This will result in a positive detection if the service data at index `25` == `4` and the service data at index `26` == `5`, otherwise, if the service data at index `30` == `0xabcd`, the result will also be positive.
+
+::: warning Note
+Nesting is discouraged from use wherever possible as the recursive nature may cause stack overflowing in some circumstances.  
+The above example could be re-written as:  
+`"condition": ["servicedata", 30, "abcd", "|", "servicedata", 25, "4", "&" "servicedata", 5, "5"]`  
+Which has the same result, without nesting.
+:::
+
+Property conditions also allow for a NOT comparison, as in
+```
+ "properties":{
+      "tempc":{
+         "condition":["manufacturerdata", 24, "!", "ffff"],
+         "decoder":["value_from_hex_data", "manufacturerdata", 24, 4, true, false],
+         "post_proc":["/", 10]
+      },
+```
+
+where then the fourth parameter is the value to test for.
+
+::: warning Note
+The NOT comparison is case sensitive! Therefor any NOT comparisons should be defined in lower case, as this is the format in which devices' "servicedata" and "manufacturerdata" are being reported.
+:::
 
 `decoder` is a JSON array that specifies the decoder function and parameters to decode the value.
 The first parameter is the name of the function to call, The available functions are:
 - "value_from_hex_data"  - converts the hex string value into an `integer` or `double` type.
 - "bf_value_from_hex_data" - converts the (binary fraction) hex string value into a `double` type.  This should be used when the hex data is represented in the format of `XX.XX`. For example: when `0x1a1e` should output 26.30.
-- "static_value" - sets the value to the static value specified if the condition is met.
 - "string_from_hex_data" - converts the hex value to a string type.
+- "static_value" - sets the value to the static value specified if the condition is met.
+- "bit_static_value" - sets the value to either one of two given values, depending on the evaluated binary bit.
 
-The other parameters are:
+The other parameters for the first three functions are:
 - "servicedata" or "manufacturerdata" Extract the value from the specified data.
-- 30, The index of the data source where the value exists.
+- 24, The index of the data source where the value exists.
 - 4, The length of the data in bytes (characters in the string).
 - true/false, If the value in the data source should have it's endianness reversed before converting.
 - (optional)true/false, Sets if the resulting value can be a negative number.
 
-`post_proc` This specifies any post processing of the resulting decoded value. This is a JSON array that should be written in the order that the operation order is desired. In the simple example the first parameter is the '/' divide operation and the second parameter (10) is the value to divide the result by. Multiple operations can be chained together in this array to perform more complex calculations.  
+```
+ "properties":{
+      "unit":{
+         "decoder":["bit_static_value", "servicedata", 1, 0, "kg", "lb"]
+      },
+```
+
+The parameters for the "bit_static_value" function are:
+- "servicedata" or "manufacturerdata" Extract the value from the specified data.
+- 1, the index of the data source where the value exists.
+- 0, the bit position from 0-3.
+- The return value for bit state 0.
+- The return value for bit state 1.
+
+`post_proc` This specifies any post processing of the resulting decoded value. This is a JSON array that should be written in the order that the operation order is desired. In the simple example the first parameter is the "/" divide operation and the second parameter (10) is the value to divide the result by. Multiple operations can be chained together in this array to perform more complex calculations.  
 
 Valid operations are:
-- '/' divide
-- '*' multiply
-- '+' add
-- '-' subtract
-- '%' modulo
-- '<' shift left
-- '>' shift right
-- '!' Not (invert), useful for bool types
-- '&' Logical And the values
+- "/" divide
+- "*" multiply
+- "+" add
+- "-" subtract
+- "%" modulo
+- "<" shift left
+- ">" shift right
+- "!" Not (invert), useful for bool types
+- "&" Logical And the values
 
 #### Special property .cal
 .cal is a special property that can extracted from the provided data and used in calculations of other properties following it's definition. For example:

@@ -1,10 +1,10 @@
-/*  
-  TheengsDecoder  - Decode things and devices
+/*
+    TheengsDecoder - Decode things and devices
 
     Copyright: (c)Florian ROBERT
-  
+
     This file is part of TheengsDecoder.
-    
+
     TheengsDecoder is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
@@ -47,7 +47,6 @@ public:
   enum BLE_ID_NUM {
     UNKNOWN_MODEL = -1,
     HHCCJCY01HHCC = 0,
-    VEGTRUG,
     LYWSD02,
     LYWSDCGQ,
     CGP1W,
@@ -60,7 +59,7 @@ public:
     IBSTH1,
     IBSTH2,
     IBT4XS,
-    IBT6XS,
+    IBT6XS_SOLIS,
     MIBAND,
     XMTZC04HM,
     XMTZC05HM,
@@ -70,6 +69,7 @@ public:
     IBEACON,
     WS02,
     WS08,
+    H5055,
     H5075,
     H5072,
     H5102,
@@ -81,16 +81,25 @@ public:
     IBT_2X,
     RUUVITAG_RAWV1,
     RUUVITAG_RAWV2,
+    SBMT,
+    SBS1,
     BM_V23,
+    MS_CDP,
+    GAEN,
+    HHCCPOT002,
     BLE_ID_MAX
   };
 
 private:
-  void reverse_hex_data(const char* in, char* out, int l);
-  double value_from_hex_string(const char* data_str, int offset, int data_length, bool reverse, bool canBeNegative = true);
-  double bf_value_from_hex_string(const char* data_str, int offset, int data_length, bool reverse, bool canBeNegative = true);
-  bool data_index_is_valid(const char* str, size_t index, size_t len);
-  int data_length_is_valid(size_t data_len, size_t default_min, JsonArray& condition, int idx);
+  void        reverse_hex_data(const char* in, char* out, int l);
+  double      value_from_hex_string(const char* data_str, int offset, int data_length, bool reverse, bool canBeNegative = true);
+  double      bf_value_from_hex_string(const char* data_str, int offset, int data_length, bool reverse, bool canBeNegative = true);
+  bool        data_index_is_valid(const char* str, size_t index, size_t len);
+  int         data_length_is_valid(size_t data_len, size_t default_min, const JsonArray& condition, int idx);
+  uint8_t     getBinaryData(char ch);
+  bool        checkPropCondition(const JsonArray& prop, const char* svc_data, const char* mfg_data);
+  bool        checkDeviceMatch(const JsonArray& condition, const char* svc_data, const char* mfg_data,
+                               const char* dev_name, const char* svc_uuid);
   std::string sanitizeJsonKey(const char* key_in);
 
   size_t m_docMax = 7168;

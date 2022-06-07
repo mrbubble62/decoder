@@ -1,10 +1,10 @@
-/*  
-  TheengsDecoder  - Decode things and devices
+/*
+    TheengsDecoder - Decode things and devices
 
     Copyright: (c)Florian ROBERT
-  
+
     This file is part of TheengsDecoder.
-    
+
     TheengsDecoder is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
@@ -39,12 +39,19 @@
 static size_t peakDocSize = 0;
 #endif
 
+#define SVC_DATA "servicedata"
+#define MFG_DATA "manufacturerdata"
+
 typedef double (TheengsDecoder::*decoder_function)(const char* data_str,
                                                    int offset, int data_length,
                                                    bool reverse, bool canBeNegative);
 
+typedef double (TheengsDecoder::*staticbitdecoder_function)(const char* data_str,
+                                                            const char* source_str, int offset, int bitindex,
+                                                            const char* falseresult, const char* trueresult);
+
 /*
- * @breif revert the string data 2 by 2 to get the correct endianness
+ * @brief Revert the string data 2 by 2 to get the correct endianness
  */
 void TheengsDecoder::reverse_hex_data(const char* in, char* out, int l) {
   int i = l, j = 0;
@@ -75,7 +82,7 @@ double TheengsDecoder::bf_value_from_hex_string(const char* data_str,
 }
 
 /*
- * @breif Extracts the data value from the data string
+ * @brief Extracts the data value from the data string
  */
 double TheengsDecoder::value_from_hex_string(const char* data_str,
                                              int offset, int data_length,
@@ -125,7 +132,7 @@ bool TheengsDecoder::data_index_is_valid(const char* str, size_t index, size_t l
 }
 
 int TheengsDecoder::data_length_is_valid(size_t data_len, size_t default_min,
-                                         JsonArray& condition, int idx) {
+                                         const JsonArray& condition, int idx) {
   std::string op = condition[idx + 1].as<std::string>();
   if (!op.empty() && op.length() > 2) {
     return (data_len >= default_min) ? 0 : -1;
@@ -146,8 +153,231 @@ int TheengsDecoder::data_length_is_valid(size_t data_len, size_t default_min,
   return -1;
 }
 
+uint8_t TheengsDecoder::getBinaryData(char ch) {
+  uint8_t data = 0;
+  if (ch >= '0' && ch <= '9')
+    data = ch - '0';
+  else if (ch >= 'a' && ch <= 'f')
+    data = 10 + (ch - 'a');
+
+  return data;
+}
+
+bool TheengsDecoder::checkDeviceMatch(const JsonArray& condition,
+                                      const char* svc_data,
+                                      const char* mfg_data,
+                                      const char* dev_name,
+                                      const char* svc_uuid) {
+  bool match = false;
+  size_t cond_size = condition.size();
+
+  for (size_t i = 0; i < cond_size;) {
+    if (condition[i].is<JsonArray>()) {
+      DEBUG_PRINT("found nested array\n");
+      match = checkDeviceMatch(condition[i], svc_data, mfg_data, dev_name, svc_uuid);
+
+      if (++i < cond_size) {
+        if (!match && *condition[i].as<const char*>() == '|') {
+        } else if (match && *condition[i].as<const char*>() == '&') {
+          match = false;
+        } else {
+          break;
+        }
+        i++;
+      } else {
+        break;
+      }
+    }
+
+    const char* cmp_str;
+    const char* cond_str = condition[i].as<const char*>();
+    int len_idx;
+    if (svc_data != nullptr && strstr(cond_str, SVC_DATA) != nullptr) {
+      len_idx = data_length_is_valid(strlen(svc_data), m_minSvcDataLen, condition, i);
+      if (len_idx >= 0) {
+        if (len_idx > 0) {
+          i += len_idx;
+          match = true;
+        }
+        cmp_str = svc_data;
+      } else {
+        match = false;
+        break;
+      }
+    } else if (mfg_data != nullptr && strstr(cond_str, MFG_DATA) != nullptr) {
+      len_idx = data_length_is_valid(strlen(mfg_data), m_minMfgDataLen, condition, i);
+      if (len_idx >= 0) {
+        if (len_idx > 0) {
+          i += len_idx;
+          match = true;
+        }
+        cmp_str = mfg_data;
+      } else {
+        match = false;
+        break;
+      }
+    } else if (dev_name != nullptr && strstr(cond_str, "name") != nullptr) {
+      cmp_str = dev_name;
+    } else if (svc_uuid != nullptr && strstr(cond_str, "uuid") != nullptr) {
+      cmp_str = svc_uuid;
+    } else {
+      break;
+    }
+
+    cond_str = condition[++i].as<const char*>();
+    if (cond_str != nullptr && *cond_str != '&' && *cond_str != '|') {
+      if (cmp_str == svc_uuid && !strncmp(cmp_str, "0x", 2)) {
+        cmp_str += 2;
+      }
+
+      if (strstr(cond_str, "contain") != nullptr) {
+        if (strstr(cmp_str, condition[++i].as<const char*>()) != nullptr) {
+          match = true;
+        } else {
+          match = false;
+        }
+        i++;
+      } else if (strstr(cond_str, "index") != nullptr) {
+        size_t cond_index = condition[++i].as<size_t>();
+        size_t cond_len = strlen(condition[++i].as<const char*>());
+
+        if (!data_index_is_valid(cmp_str, cond_index, cond_len)) {
+          DEBUG_PRINT("Invalid data %s; skipping\n", cmp_str);
+          match = false;
+          break;
+        }
+
+        bool inverse = false;
+        if (*condition[i].as<const char*>() == '!') {
+          inverse = true;
+          i++;
+        }
+
+        DEBUG_PRINT("comparing value: %s to %s at index %lu\n",
+                    &cmp_str[cond_index],
+                    condition[i].as<const char*>(),
+                    cond_index);
+
+        if (strncmp(&cmp_str[cond_index],
+                    condition[i].as<const char*>(),
+                    cond_len) == 0) {
+          match = inverse ? false : true;
+        } else {
+          match = inverse ? true : false;
+        }
+
+        i++;
+      }
+
+      cond_str = condition[i].as<const char*>();
+    }
+
+    if (i < cond_size && cond_str != nullptr) {
+      if (!match && *cond_str == '|') {
+        i++;
+        continue;
+      } else if (match && *cond_str == '&') {
+        i++;
+        match = false;
+        continue;
+      } else if (match) { // check for AND case before exit
+        while (i < cond_size && *cond_str != '&') {
+          if (!condition[++i].is<const char*>()) {
+            continue;
+          }
+          cond_str = condition[i].as<const char*>();
+        }
+
+        if (i < cond_size && cond_str != nullptr) {
+          i++;
+          match = false;
+          continue;
+        }
+      }
+    }
+    break;
+  }
+  return match;
+}
+
+bool TheengsDecoder::checkPropCondition(const JsonArray& prop_condition,
+                                        const char* svc_data,
+                                        const char* mfg_data) {
+  int cond_size = prop_condition.size();
+  bool cond_met = prop_condition.isNull();
+
+  if (!cond_met) {
+    for (int i = 0; i < cond_size; i += 4) {
+      if (prop_condition[i].is<JsonArray>()) {
+        DEBUG_PRINT("found nested array\n");
+        cond_met = checkPropCondition(prop_condition[i], svc_data, mfg_data);
+
+        if (++i < cond_size) {
+          if (!cond_met && *prop_condition[i].as<const char*>() == '|') {
+          } else if (cond_met && *prop_condition[i].as<const char*>() == '&') {
+            cond_met = false;
+          } else {
+            break;
+          }
+          i++;
+        } else {
+          break;
+        }
+      }
+
+      bool inverse = *(const char*)prop_condition[i + 2] == '!';
+      const char* prop_data_src = prop_condition[i];
+      const char* data_src = nullptr;
+
+      if (svc_data && strstr(prop_data_src, SVC_DATA) != nullptr) {
+        data_src = svc_data;
+      } else if (mfg_data && strstr(prop_data_src, MFG_DATA) != nullptr) {
+        data_src = mfg_data;
+      }
+
+      if (data_src) {
+        size_t cond_len = strlen(prop_condition[i + 2 + inverse].as<const char*>());
+        if (strstr((const char*)prop_condition[i + 2], "bit") != nullptr) {
+          char ch = *(data_src + prop_condition[i + 1].as<int>());
+          uint8_t data = getBinaryData(ch);
+        
+          uint8_t shift = prop_condition[i + 3].as<uint8_t>();
+          uint8_t val = prop_condition[i + 4].as<uint8_t>();
+          if (((data >> shift) & 0x01) == val) {
+            cond_met = true;
+          }
+          i += 2;
+        } else if (!strncmp(&data_src[prop_condition[i + 1].as<int>()],
+                     prop_condition[i + 2 + inverse].as<const char*>(), cond_len)) {
+          cond_met = inverse ? false : true;
+        } else {
+          cond_met = inverse ? true : false;
+        }
+      } else {
+        DEBUG_PRINT("ERROR property condition data source invalid\n");
+        return false;
+      }
+
+      i += inverse;
+
+      if (cond_size > (i + 3)) {
+        if (!cond_met && *prop_condition[i + 3].as<const char*>() == '|') {
+          continue;
+        } else if (cond_met && *prop_condition[i + 3].as<const char*>() == '&') {
+          cond_met = false;
+          continue;
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  return cond_met;
+}
+
 /*
- * @breif Compares the input json values to the known devices and
+ * @brief Compares the input json values to the known devices and
  * decodes the data if a match is found.
  */
 int TheengsDecoder::decodeBLEJson(JsonObject& jsondata) {
@@ -156,8 +386,8 @@ int TheengsDecoder::decodeBLEJson(JsonObject& jsondata) {
 #else
   DynamicJsonDocument doc(m_docMax);
 #endif
-  const char* svc_data = jsondata["servicedata"].as<const char*>();
-  const char* mfg_data = jsondata["manufacturerdata"].as<const char*>();
+  const char* svc_data = jsondata[SVC_DATA].as<const char*>();
+  const char* mfg_data = jsondata[MFG_DATA].as<const char*>();
   const char* dev_name = jsondata["name"].as<const char*>();
   const char* svc_uuid = jsondata["servicedatauuid"].as<const char*>();
   int success = -1;
@@ -183,93 +413,8 @@ int TheengsDecoder::decodeBLEJson(JsonObject& jsondata) {
       peakDocSize = doc.memoryUsage();
 #endif
 
-    JsonArray condition = doc["condition"];
-    bool match = false;
-    size_t min_len = m_minMfgDataLen;
-
-    for (unsigned int i = 0; i < condition.size();) {
-      const char* cmp_str;
-      const char* cond_str = condition[i].as<const char*>();
-      int len_idx;
-      if (svc_data != nullptr && strstr(cond_str, "servicedata") != nullptr) {
-        len_idx = data_length_is_valid(strlen(svc_data), m_minSvcDataLen, condition, i);
-        if (len_idx >= 0) {
-          i += len_idx;
-          cmp_str = svc_data;
-          match = true;
-        } else {
-          match = false;
-          break;
-        }
-      } else if (mfg_data != nullptr && strstr(cond_str, "manufacturerdata") != nullptr) {
-        len_idx = data_length_is_valid(strlen(mfg_data), m_minMfgDataLen, condition, i);
-        if (len_idx >= 0) {
-          i += len_idx;
-          cmp_str = mfg_data;
-          match = true;
-        } else {
-          match = false;
-          break;
-        }
-      } else if (dev_name != nullptr && strstr(cond_str, "name") != nullptr) {
-        cmp_str = dev_name;
-      } else if (svc_uuid != nullptr && strstr(cond_str, "uuid") != nullptr) {
-        cmp_str = svc_uuid;
-      } else {
-        break;
-      }
-
-      cond_str = condition[i + 1].as<const char*>();
-      if (cond_str) {
-        if (cmp_str == svc_uuid && !strncmp(cmp_str, "0x", 2)) {
-          cmp_str += 2;
-        }
-
-        if (strstr(cond_str, "contain") != nullptr) {
-          if (strstr(cmp_str, condition[i + 2].as<const char*>()) != nullptr) {
-            match = true;
-          } else {
-            match = false;
-          }
-          i += 3;
-        } else if (strstr(cond_str, "index") != nullptr) {
-          size_t cond_index = condition[i + 2].as<size_t>();
-          size_t cond_len = strlen(condition[i + 3].as<const char*>());
-
-          if (!data_index_is_valid(cmp_str, cond_index, cond_len)) {
-            DEBUG_PRINT("Invalid data %s; skipping\n", cmp_str);
-            match = false;
-            break;
-          }
-          DEBUG_PRINT("comparing index: %s to %s at index %u\n",
-                      &cmp_str[condition[i + 2].as<unsigned int>()],
-                      condition[i + 3].as<const char*>(), condition[i + 2].as<unsigned int>());
-          if (strncmp(&cmp_str[cond_index], condition[i + 3].as<const char*>(), cond_len) == 0) {
-            match = true;
-          } else {
-            match = false;
-          }
-          i += 4;
-        }
-
-        cond_str = condition[i].as<const char*>();
-      }
-
-      if (i < condition.size() && cond_str != nullptr) {
-        if (!match && *cond_str == '|') {
-          i++;
-          continue;
-        } else if (match && *cond_str == '&') {
-          i++;
-          match = false;
-          continue;
-        }
-      }
-      break;
-    }
-
     /* found a match, extract the data */
-    if (match) {
+    if (checkDeviceMatch(doc["condition"], svc_data, mfg_data, dev_name, svc_uuid)) {
       jsondata["brand"] = doc["brand"];
       jsondata["model"] = doc["model"];
       jsondata["model_id"] = doc["model_id"];
@@ -279,147 +424,160 @@ int TheengsDecoder::decodeBLEJson(JsonObject& jsondata) {
       /* Loop through all the devices properties and extract the values */
       for (JsonPair kv : properties) {
         JsonObject prop = kv.value().as<JsonObject>();
-        JsonArray prop_condition = prop["condition"];
 
-        if (prop_condition.isNull() || strstr((const char*)prop_condition[0], "servicedata") != nullptr ||
-            strstr((const char*)prop_condition[0], "manufacturerdata") != nullptr) {
-          if (prop_condition.isNull() ||
-              (svc_data && svc_data[prop_condition[1].as<int>()] == *prop_condition[2].as<const char*>()) ||
-              (mfg_data && mfg_data[prop_condition[1].as<int>()] == *prop_condition[2].as<const char*>())) {
-            JsonArray decoder = prop["decoder"];
-            if (strstr((const char*)decoder[0], "value_from_hex_data") != nullptr) {
-              const char* src = svc_data;
-              if (strstr((const char*)decoder[1], "manufacturerdata")) {
-                src = mfg_data;
+        if (checkPropCondition(prop["condition"], svc_data, mfg_data)) {
+          JsonArray decoder = prop["decoder"];
+          if (strstr((const char*)decoder[0], "value_from_hex_data") != nullptr) {
+            const char* src = svc_data;
+            if (strstr((const char*)decoder[1], MFG_DATA)) {
+              src = mfg_data;
+            }
+
+            /* use a double for all values and cast later if required */
+            double temp_val;
+            static double cal_val = 0;
+
+            if (data_index_is_valid(src, decoder[2].as<int>(), decoder[3].as<int>())) {
+              decoder_function dec_fun = &TheengsDecoder::value_from_hex_string;
+
+              if (strstr((const char*)decoder[0], "bf") != nullptr) {
+                dec_fun = &TheengsDecoder::bf_value_from_hex_string;
               }
 
-              /* use a double for all values and cast later if required */
-              double temp_val;
-              static long cal_val = 0;
+              temp_val = (this->*dec_fun)(src, decoder[2].as<int>(),
+                                          decoder[3].as<int>(),
+                                          decoder[4].as<bool>(),
+                                          decoder[5].isNull() ? true : decoder[5].as<bool>());
 
-              if (data_index_is_valid(src, decoder[2].as<int>(), decoder[3].as<int>())) {
-                decoder_function dec_fun = &TheengsDecoder::value_from_hex_string;
+            } else {
+              break;
+            }
 
-                if (strstr((const char*)decoder[0], "bf") != nullptr) {
-                  dec_fun = &TheengsDecoder::bf_value_from_hex_string;
-                }
-
-                temp_val = (this->*dec_fun)(src, decoder[2].as<int>(),
-                                            decoder[3].as<int>(),
-                                            decoder[4].as<bool>(),
-                                            decoder[5].isNull() ? true : decoder[5].as<bool>());
-
-              } else {
-                break;
-              }
-
-              /* Do any required post processing of the value */
-              if (prop.containsKey("post_proc")) {
-                JsonArray post_proc = prop["post_proc"];
-                for (unsigned int i = 0; i < post_proc.size(); i += 2) {
-                  if (cal_val && post_proc[i + 1].as<const char*>() != NULL &&
-                      strncmp(post_proc[i + 1].as<const char*>(), ".cal", 4) == 0) {
-                    switch (*post_proc[i].as<const char*>()) {
-                      case '/':
-                        temp_val /= cal_val;
-                        break;
-                      case '*':
-                        temp_val *= cal_val;
-                        break;
-                      case '-':
-                        temp_val -= cal_val;
-                        break;
-                      case '+':
-                        temp_val += cal_val;
-                        break;
+            /* Do any required post processing of the value */
+            if (prop.containsKey("post_proc")) {
+              JsonArray post_proc = prop["post_proc"];
+              for (unsigned int i = 0; i < post_proc.size(); i += 2) {
+                if (cal_val && post_proc[i + 1].as<const char*>() != NULL &&
+                    strncmp(post_proc[i + 1].as<const char*>(), ".cal", 4) == 0) {
+                  switch (*post_proc[i].as<const char*>()) {
+                    case '/':
+                      temp_val /= cal_val;
+                      break;
+                    case '*':
+                      temp_val *= cal_val;
+                      break;
+                    case '-':
+                      temp_val -= cal_val;
+                      break;
+                    case '+':
+                      temp_val += cal_val;
+                      break;
+                  }
+                } else {
+                  switch (*post_proc[i].as<const char*>()) {
+                    case '/':
+                      temp_val /= post_proc[i + 1].as<double>();
+                      break;
+                    case '*':
+                      temp_val *= post_proc[i + 1].as<double>();
+                      break;
+                    case '-':
+                      temp_val -= post_proc[i + 1].as<double>();
+                      break;
+                    case '+':
+                      temp_val += post_proc[i + 1].as<double>();
+                      break;
+                    case '%': {
+                      long val = (long)temp_val;
+                      temp_val = val % post_proc[i + 1].as<long>();
+                      break;
                     }
-                  } else {
-                    switch (*post_proc[i].as<const char*>()) {
-                      case '/':
-                        temp_val /= post_proc[i + 1].as<double>();
-                        break;
-                      case '*':
-                        temp_val *= post_proc[i + 1].as<double>();
-                        break;
-                      case '-':
-                        temp_val -= post_proc[i + 1].as<double>();
-                        break;
-                      case '+':
-                        temp_val += post_proc[i + 1].as<double>();
-                        break;
-                      case '%': {
-                        long val = (long)temp_val;
-                        temp_val = val % post_proc[i + 1].as<long>();
-                        break;
-                      }
-                      case '<': {
-                        long val = (long)temp_val;
-                        temp_val = val << post_proc[i + 1].as<unsigned int>();
-                        break;
-                      }
-                      case '>': {
-                        long val = (long)temp_val;
-                        temp_val = val >> post_proc[i + 1].as<unsigned int>();
-                        break;
-                      }
-                      case '!': {
-                        bool val = (bool)temp_val;
-                        temp_val = !val;
-                        break;
-                      }
-                      case '&': {
-                        long val = (long)temp_val;
-                        temp_val = val & post_proc[i + 1].as<unsigned int>();
-                        break;
-                      }
+                    case '<': {
+                      long val = (long)temp_val;
+                      temp_val = val << post_proc[i + 1].as<unsigned int>();
+                      break;
+                    }
+                    case '>': {
+                      long val = (long)temp_val;
+                      temp_val = val >> post_proc[i + 1].as<unsigned int>();
+                      break;
+                    }
+                    case '!': {
+                      bool val = (bool)temp_val;
+                      temp_val = !val;
+                      break;
+                    }
+                    case '&': {
+                      long val = (long)temp_val;
+                      temp_val = val & post_proc[i + 1].as<unsigned int>();
+                      break;
                     }
                   }
                 }
               }
+            }
 
-              /* If there is any underscores at the beginning of the property name, there is multiple 
-               * properties of this type, we need remove the underscores for creating the key.
-               */
-              std::string _key = sanitizeJsonKey(kv.key().c_str());
+            /* If there is any underscores at the beginning of the property name, there is multiple
+                * properties of this type, we need remove the underscores for creating the key.
+                */
+            std::string _key = sanitizeJsonKey(kv.key().c_str());
 
-              /* calculation values extracted from data are not added to the deocded outupt
-               * instead we store them teporarily to use with the next data properties.
-               */
-              if (_key == ".cal") {
-                cal_val = (long)temp_val;
-                continue;
+            /* calculation values extracted from data are not added to the deocded outupt
+                * instead we store them teporarily to use with the next data properties.
+                */
+            if (_key == ".cal") {
+              cal_val = temp_val;
+              continue;
+            }
+
+            /* Cast to a differnt value type if specified */
+            if (prop.containsKey("is_bool")) {
+              jsondata[_key] = (bool)temp_val;
+            } else {
+              jsondata[_key] = temp_val;
+            }
+
+            /* If the property is temp in C, make sure to convert and add temp in F */
+            if (_key.find("tempc", 0, 5) != std::string::npos) {
+              double tc = jsondata[_key];
+              _key[4] = 'f';
+              jsondata[_key] = tc * 1.8 + 32;
+              _key[4] = 'c';
+            }
+
+            success = i_main;
+            DEBUG_PRINT("found value = %s : %.2f\n", _key.c_str(), jsondata[_key].as<double>());
+          } else if (strstr((const char*)decoder[0], "static_value") != nullptr) {
+            if (strstr((const char*)decoder[0], "bit") != nullptr) {
+              JsonArray staticbitdecoder = prop["decoder"];
+              const char* data_src = nullptr;
+
+              if (svc_data && strstr((const char*)staticbitdecoder[1], SVC_DATA) != nullptr) {
+                data_src = svc_data;
+              } else if (mfg_data && strstr((const char*)staticbitdecoder[1], MFG_DATA) != nullptr) {
+                data_src = mfg_data;
               }
 
-              /* Cast to a differnt value type if specified */
-              if (prop.containsKey("is_bool")) {
-                jsondata[_key] = (bool)temp_val;
-              } else {
-                jsondata[_key] = temp_val;
-              }
+              char ch = *(data_src + staticbitdecoder[2].as<int>());
+              uint8_t data = getBinaryData(ch);
+              uint8_t shift = staticbitdecoder[3].as<uint8_t>();
+              int x = 4 + ((data >> shift) & 0x01);
 
-              /* If the property is temp in C, make sure to convert and add temp in F */
-              if (_key.find("tempc", 0, 5) != std::string::npos) {
-                double tc = jsondata[_key];
-                _key[4] = 'f';
-                jsondata[_key] = tc * 1.8 + 32;
-                _key[4] = 'c';
-              }
-
+              jsondata[sanitizeJsonKey(kv.key().c_str())] = staticbitdecoder[x];
               success = i_main;
-              DEBUG_PRINT("found value = %s : %.2f\n", _key.c_str(), jsondata[_key].as<double>());
-            } else if (strstr((const char*)decoder[0], "static_value") != nullptr) {
+            } else {
               jsondata[sanitizeJsonKey(kv.key().c_str())] = decoder[1];
               success = i_main;
-            } else if (strstr((const char*)decoder[0], "string_from_hex_data") != nullptr) {
-              const char* src = svc_data;
-              if (strstr((const char*)decoder[1], "manufacturerdata")) {
-                src = mfg_data;
-              }
-
-              std::string value(src + decoder[2].as<int>(), decoder[3].as<int>());
-              jsondata[sanitizeJsonKey(kv.key().c_str())] = value;
-              success = i_main;
             }
+          } else if (strstr((const char*)decoder[0], "string_from_hex_data") != nullptr) {
+            const char* src = svc_data;
+            if (strstr((const char*)decoder[1], MFG_DATA)) {
+              src = mfg_data;
+            }
+
+            std::string value(src + decoder[2].as<int>(), decoder[3].as<int>());
+            jsondata[sanitizeJsonKey(kv.key().c_str())] = value;
+            success = i_main;
           }
         }
       }
